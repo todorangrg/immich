@@ -20,6 +20,25 @@ RUN mkdir /opt/armnn && \
 
 FROM builder-cpu AS builder-rknn
 
+# renovate: datasource=github-releases depName=alibaba/MNN
+ARG MNN_VERSION="3.6.1"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        cmake \
+        build-essential \
+        curl \
+        ca-certificates \
+        zlib1g-dev \
+        ocl-icd-libopencl1 \
+        libvulkan1 \
+        libvulkan-dev && \
+    curl -fsSL "https://github.com/alibaba/MNN/archive/refs/tags/${MNN_VERSION}.tar.gz" \
+        | tar -xz -C /tmp && \
+    mv /tmp/MNN-${MNN_VERSION} /tmp/mnn-src && \
+    rm -rf /var/lib/apt/lists/*
+
+
 # Warning: 25GiB+ disk space required to pull this image
 # TODO: find a way to reduce the image size
 FROM rocm/dev-ubuntu-24.04:7.2-complete@sha256:86e11093b4a7ec2a79b1b6701d10e840a6994f21c7e05929b51eb9be361c683a AS builder-rocm
@@ -27,6 +46,10 @@ FROM rocm/dev-ubuntu-24.04:7.2-complete@sha256:86e11093b4a7ec2a79b1b6701d10e840a
 FROM builder-${DEVICE} AS builder
 
 ARG DEVICE
+# renovate: datasource=github-releases depName=alibaba/MNN
+ARG MNN_VERSION="3.6.1"
+# Parallelism for MNN cmake/make (lower if the builder OOMs/segfaults under load)
+ARG MNN_BUILD_JOBS=16
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     VIRTUAL_ENV=/opt/venv
@@ -38,6 +61,48 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --frozen --extra ${DEVICE} --no-dev --no-editable --no-install-project --compile-bytecode --no-progress --active --link-mode copy
+
+# Build inference-only libMNN (CPU + OpenCL + Vulkan + FP16) for OCR on Rockchip Mali.
+# Split make from PyMNN install so a failed install keeps the expensive compile layer cached.
+RUN if [ "$DEVICE" = "rknn" ]; then \
+        mkdir -p /tmp/mnn-src/pymnn_build && \
+        cd /tmp/mnn-src/pymnn_build && \
+        cmake /tmp/mnn-src \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-march=armv8.2-a+fp16" \
+            -DCMAKE_CXX_FLAGS="-march=armv8.2-a+fp16" \
+            -DMNN_BUILD_SHARED_LIBS=OFF \
+            -DMNN_SEP_BUILD=OFF \
+            -DMNN_USE_THREAD_POOL=ON \
+            -DMNN_OPENMP=OFF \
+            -DMNN_USE_SSE=OFF \
+            -DMNN_ARM82=ON \
+            -DMNN_OPENCL=ON \
+            -DMNN_VULKAN=ON \
+            -DMNN_VULKAN_IMAGE=OFF \
+            -DMNN_LOW_MEMORY=OFF \
+            -DMNN_SUPPORT_TRANSFORMER_FUSE=ON \
+            -DMNN_BUILD_CONVERTER=OFF \
+            -DMNN_BUILD_TRAIN=OFF \
+            -DMNN_BUILD_TORCH=OFF \
+            -DMNN_BUILD_LLM=OFF \
+            -DMNN_BUILD_OPENCV=OFF \
+            -DMNN_BUILD_AUDIO=OFF \
+            -DMNN_BUILD_DEMO=OFF \
+            -DMNN_AAPL_FMWK=OFF && \
+        make -j"${MNN_BUILD_JOBS}" MNN; \
+    fi
+
+# uv venvs omit pip by default; bootstrap it before MNN's setup.py install.
+RUN --mount=type=bind,source=scripts/patch-pymnn-setup.py,target=/tmp/patch-pymnn-setup.py \
+    if [ "$DEVICE" = "rknn" ]; then \
+        cd /tmp/mnn-src/pymnn/pip_package && \
+        uv pip install --python /opt/venv/bin/python pip setuptools wheel && \
+        python3 /tmp/patch-pymnn-setup.py setup.py && \
+        . /opt/venv/bin/activate && \
+        python3 setup.py install --deps "opencl vulkan" && \
+        rm -rf /tmp/mnn-src; \
+    fi
 
 FROM python:3.11-slim-bookworm@sha256:e2d3af735aff6eeee600b1933bedd99da6645fedf572cc12ef4cc1331f2ceebe AS prod-cpu
 
@@ -114,6 +179,16 @@ ENV LD_PRELOAD=/usr/lib/libmimalloc.so.2 \
 
 ADD --chmod=644 --checksum=sha256:d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8 "https://github.com/airockchip/rknn-toolkit2/raw/refs/tags/${RKNN_TOOLKIT_VERSION}/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so" /usr/lib/
 ADD --checksum=sha256:c48e11a6f41b451a5fd1e4ad774ea60252d3d94f78bee9b21ea3d21b21deba9a "https://github.com/airockchip/rknn-toolkit2/raw/refs/tags/${RKNN_TOOLKIT_VERSION}/rknpu2/runtime/Linux/librknn_api/include/rknn_api.h" /usr/include/
+
+# OpenCL/Vulkan for MNN OCR on Mali (host mounts libmali + ICDs via hwaccel.ml.yml).
+# MNN dlopens "libOpenCL.so" / "libvulkan.so" (unversioned); libvulkan1 only ships .so.1.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ocl-icd-libopencl1 libvulkan1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir --parents /etc/OpenCL/vendors /usr/lib/aarch64-linux-gnu/mali && \
+    echo "/usr/lib/libmali.so" > /etc/OpenCL/vendors/mali.icd && \
+    ln -sf /usr/lib/aarch64-linux-gnu/mali/libMaliOpenCL.so.1 /usr/lib/aarch64-linux-gnu/mali/libOpenCL.so && \
+    ln -sf /usr/lib/$(arch)-linux-gnu/libvulkan.so.1 /usr/lib/$(arch)-linux-gnu/libvulkan.so
 
 FROM prod-${DEVICE} AS prod
 
