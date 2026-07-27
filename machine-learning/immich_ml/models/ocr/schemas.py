@@ -20,8 +20,17 @@ class TextRecognitionOutput(TypedDict):
 
 # RapidOCR expects `engine_type`, `lang_type`, and `font_path` to be attributes
 class OcrOptions(dict[str, Any]):
-    def __init__(self, lang_type: LangRec | None = None, **options: Any) -> None:
+    def __init__(
+        self,
+        lang_type: LangRec | None = None,
+        engine_type: EngineType = EngineType.ONNXRUNTIME,
+        **options: Any,
+    ) -> None:
         super().__init__(**options)
-        self.engine_type = EngineType.ONNXRUNTIME
+        self.engine_type = engine_type
         self.lang_type = lang_type
         self.font_path = None
+        # RapidOCR also reads these as attributes for non-ORT engines (e.g. MNN dict download)
+        for key in ("ocr_version", "task_type", "model_type"):
+            if key in options:
+                setattr(self, key, options[key])

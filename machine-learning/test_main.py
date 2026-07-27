@@ -34,6 +34,7 @@ from immich_ml.sessions.ann import AnnSession
 from immich_ml.sessions.ort import OrtSession
 from immich_ml.sessions.rknn import RKNNInferenceResult, RknnSession
 from immich_ml.sessions.rknn.immich_session import get_soc
+from rapidocr.utils.typings import EngineType
 
 
 class FakeLock:
@@ -167,7 +168,7 @@ class TestBase:
             "immich-app/ViT-B-32__openai",
             cache_dir=encoder.cache_dir,
             local_dir=encoder.cache_dir,
-            ignore_patterns=["*.armnn", "*.rknn"],
+            ignore_patterns=["*.armnn", "*.rknn", "*.mnn"],
         )
 
     def test_download_downloads_armnn_if_preferred_format(self, snapshot_download: mock.Mock) -> None:
@@ -178,7 +179,7 @@ class TestBase:
             "immich-app/ViT-B-32__openai",
             cache_dir=encoder.cache_dir,
             local_dir=encoder.cache_dir,
-            ignore_patterns=["*.rknn"],
+            ignore_patterns=["*.rknn", "*.mnn"],
         )
 
     def test_download_downloads_rknn_if_preferred_format(self, snapshot_download: mock.Mock) -> None:
@@ -189,7 +190,7 @@ class TestBase:
             "immich-app/ViT-B-32__openai",
             cache_dir=encoder.cache_dir,
             local_dir=encoder.cache_dir,
-            ignore_patterns=["*.armnn"],
+            ignore_patterns=["*.armnn", "*.mnn"],
         )
 
     def test_throws_exception_if_model_path_does_not_exist(
@@ -1132,6 +1133,100 @@ class TestOcr:
                 model_root_dir=text_recognizer.cache_dir,
             )
         )
+
+    def test_uses_mnn_for_recognition_when_available(
+        self, path: mock.Mock, mocker: MockerFixture
+    ) -> None:
+        path.return_value.__truediv__.return_value.__truediv__.return_value.suffix = ".mnn"
+        mocker.patch("immich_ml.models.base.InferenceModel.download")
+        mocker.patch("immich_ml.models.ocr.detection.mnn.is_available", True)
+        mocker.patch("immich_ml.models.ocr.recognition.install_mnn_defaults")
+        rapid_recognizer = mocker.patch("immich_ml.models.ocr.recognition.RapidTextRecognizer")
+        mocker.patch.object(settings, "mnn", True)
+
+        text_recognizer = TextRecognizer("PP-OCRv5_mobile", cache_dir="test_cache")
+        assert text_recognizer.model_format == ModelFormat.MNN
+        text_recognizer.load()
+
+        options = rapid_recognizer.call_args.args[0]
+        assert options.engine_type == EngineType.MNN
+        assert "session" not in options
+        assert options["model_path"] == str(text_recognizer.model_path)
+
+    def test_detection_uses_mnn_session_when_available(self, path: mock.Mock, mocker: MockerFixture) -> None:
+        path.return_value.__truediv__.return_value.__truediv__.return_value.suffix = ".mnn"
+        mocker.patch("immich_ml.models.base.InferenceModel.download")
+        mocker.patch("immich_ml.models.ocr.detection.mnn.is_available", True)
+        mnn_session = mocker.patch("immich_ml.models.ocr.detection.MnnSession")
+        mocker.patch.object(settings, "mnn", True)
+
+        text_detector = TextDetector("PP-OCRv5_mobile", cache_dir="test_cache")
+        assert text_detector.model_format == ModelFormat.MNN
+        text_detector.load()
+
+        mnn_session.assert_called_once_with(text_detector.model_path)
+
+    def test_ocr_stays_on_onnx_when_mnn_disabled(self, path: mock.Mock, mocker: MockerFixture) -> None:
+        path.return_value.__truediv__.return_value.__truediv__.return_value.suffix = ".onnx"
+        mocker.patch("immich_ml.models.ocr.detection.mnn.is_available", True)
+        mocker.patch.object(settings, "mnn", False)
+
+        text_detector = TextDetector("PP-OCRv5_mobile", cache_dir="test_cache")
+        text_recognizer = TextRecognizer("PP-OCRv5_mobile", cache_dir="test_cache")
+
+        assert text_detector.model_format == ModelFormat.ONNX
+        assert text_recognizer.model_format == ModelFormat.ONNX
+
+    def test_mnn_cache_file_lives_next_to_model(self) -> None:
+        from immich_ml.sessions.mnn import cache_file_for_model
+
+        assert cache_file_for_model("/cache/ocr/detection/model.mnn") == Path(
+            "/cache/ocr/detection/model.mnncache"
+        )
+
+    def test_mnn_session_config_opencl_defaults(self) -> None:
+        from immich_ml.sessions.mnn import session_config
+
+        assert session_config() == {
+            "backend": "OPENCL",
+            "numThread": 68,
+            "precision": 2,
+            "memory": 2,
+            "power": 1,
+        }
+
+    def test_mnn_interpreter_wrap_sets_cache_and_updates_after_run(self, mocker: MockerFixture) -> None:
+        import immich_ml.sessions.mnn.backend as backend
+
+        interpreter_instance = mock.Mock()
+        interpreter_instance.createSession.return_value = "session"
+        interpreter_cls = mock.Mock(return_value=interpreter_instance)
+        mnn_mod = mock.Mock()
+        mnn_mod.Interpreter = interpreter_cls
+
+        mocker.patch.object(backend, "is_available", True)
+        mocker.patch.object(backend, "MNN", mnn_mod)
+        mocker.patch.object(backend, "_installed", False)
+        mocker.patch.object(settings, "mnn", True)
+
+        assert backend.install_mnn_defaults() is True
+
+        wrapped = mnn_mod.Interpreter("/cache/ocr/detection/model.mnn")
+        session = wrapped.createSession()
+
+        interpreter_instance.setCacheFile.assert_called_once_with("/cache/ocr/detection/model.mnncache")
+        interpreter_instance.createSession.assert_called_once_with(backend.session_config())
+        assert session == "session"
+
+        wrapped.runSession(session)
+        interpreter_instance.runSession.assert_called_once_with(session)
+        interpreter_instance.updateCacheFile.assert_called_once_with(session, 0)
+
+        # Explicit config still gets a cache file (detection MnnSession path).
+        interpreter_instance.reset_mock()
+        wrapped.createSession({"backend": "CPU", "numThread": 2})
+        interpreter_instance.setCacheFile.assert_called_once_with("/cache/ocr/detection/model.mnncache")
+        interpreter_instance.createSession.assert_called_once_with({"backend": "CPU", "numThread": 2})
 
 
 @pytest.mark.asyncio

@@ -67,9 +67,10 @@ class InferenceModel(ABC):
 
     def _download(self) -> None:
         ignored_patterns: dict[ModelFormat, list[str]] = {
-            ModelFormat.ONNX: ["*.armnn", "*.rknn"],
-            ModelFormat.ARMNN: ["*.rknn"],
-            ModelFormat.RKNN: ["*.armnn"],
+            ModelFormat.ONNX: ["*.armnn", "*.rknn", "*.mnn"],
+            ModelFormat.ARMNN: ["*.rknn", "*.mnn"],
+            ModelFormat.RKNN: ["*.armnn", "*.mnn"],
+            ModelFormat.MNN: ["*.armnn", "*.rknn"],
         }
 
         snapshot_download(
@@ -115,6 +116,10 @@ class InferenceModel(ABC):
                 session = OrtSession(model_path)
             case ".rknn":
                 session = rknn.RknnSession(model_path)
+            case ".mnn":
+                from immich_ml.sessions.mnn import MnnSession
+
+                session = MnnSession(model_path)
             case _:
                 raise ValueError(f"Unsupported model file type: {model_path.suffix}")
         return session

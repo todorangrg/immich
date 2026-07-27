@@ -15,8 +15,10 @@ from immich_ml.config import log, settings
 from immich_ml.models.base import InferenceModel
 from immich_ml.models.transforms import pil_to_cv2
 from immich_ml.schemas import ModelFormat, ModelSession, ModelTask, ModelType
+from immich_ml.sessions.mnn import install_mnn_defaults
 from immich_ml.sessions.ort import OrtSession
 
+from .detection import _ocr_engine_type, _ocr_model_format
 from .schemas import OcrOptions, TextDetectionOutput, TextRecognitionOutput
 
 
@@ -34,16 +36,18 @@ class TextRecognizer(InferenceModel):
             "textScore": np.empty(0, dtype=np.float32),
         }
         VisRes.__init__ = lambda self, **kwargs: None  # pyright: ignore[reportAttributeAccessIssue]
-        super().__init__(model_name, **model_kwargs, model_format=ModelFormat.ONNX)
+        model_format = model_kwargs.pop("model_format", None) or _ocr_model_format()
+        self._rapid_model_type = RapidModelType.MOBILE if "mobile" in model_name else RapidModelType.SERVER
+        super().__init__(model_name, **model_kwargs, model_format=model_format)
 
     def _download(self) -> None:
         model_info = InferSession.get_model_url(
             FileInfo(
-                engine_type=EngineType.ONNXRUNTIME,
+                engine_type=_ocr_engine_type(),
                 ocr_version=OCRVersion.PPOCRV5,
                 task_type=TaskType.REC,
                 lang_type=self.language,
-                model_type=RapidModelType.MOBILE if "mobile" in self.model_name else RapidModelType.SERVER,
+                model_type=self._rapid_model_type,
             )
         )
         download_params = DownloadFileInput(
@@ -55,13 +59,31 @@ class TextRecognizer(InferenceModel):
         DownloadFile.run(download_params)
 
     def _load(self) -> ModelSession:
-        # TODO: support other runtimes
-        session = OrtSession(self.model_path)
         max_batch_size = settings.max_batch_size and settings.max_batch_size.ocr
+        rec_batch_num = max_batch_size if max_batch_size else 6
+
+        if self.model_format == ModelFormat.MNN:
+            install_mnn_defaults()
+            self.model = RapidTextRecognizer(
+                OcrOptions(
+                    engine_type=EngineType.MNN,
+                    model_path=str(self.model_path),
+                    rec_batch_num=rec_batch_num,
+                    rec_img_shape=(3, 48, 320),
+                    lang_type=self.language,
+                    model_root_dir=self.cache_dir,
+                    ocr_version=OCRVersion.PPOCRV5,
+                    task_type=TaskType.REC,
+                    model_type=self._rapid_model_type,
+                )
+            )
+            return self.model.session
+
+        session = OrtSession(self.model_path)
         self.model = RapidTextRecognizer(
             OcrOptions(
                 session=session.session,
-                rec_batch_num=max_batch_size if max_batch_size else 6,
+                rec_batch_num=rec_batch_num,
                 rec_img_shape=(3, 48, 320),
                 lang_type=self.language,
                 model_root_dir=self.cache_dir,

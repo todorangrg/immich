@@ -10,12 +10,22 @@ from rapidocr.utils.download_file import DownloadFile, DownloadFileInput
 from rapidocr.utils.typings import EngineType, LangDet, OCRVersion, TaskType
 from rapidocr.utils.typings import ModelType as RapidModelType
 
-from immich_ml.config import log
+from immich_ml.config import log, settings
 from immich_ml.models.base import InferenceModel
 from immich_ml.schemas import ModelFormat, ModelSession, ModelTask, ModelType
+from immich_ml.sessions import mnn
+from immich_ml.sessions.mnn import MnnSession
 from immich_ml.sessions.ort import OrtSession
 
 from .schemas import TextDetectionOutput
+
+
+def _ocr_engine_type() -> EngineType:
+    return EngineType.MNN if settings.mnn and mnn.is_available else EngineType.ONNXRUNTIME
+
+
+def _ocr_model_format() -> ModelFormat:
+    return ModelFormat.MNN if settings.mnn and mnn.is_available else ModelFormat.ONNX
 
 
 class TextDetector(InferenceModel):
@@ -23,7 +33,8 @@ class TextDetector(InferenceModel):
     identity = (ModelType.DETECTION, ModelTask.OCR)
 
     def __init__(self, model_name: str, min_score: float = 0.5, **model_kwargs: Any) -> None:
-        super().__init__(model_name.split("__")[-1], **model_kwargs, model_format=ModelFormat.ONNX)
+        model_format = model_kwargs.pop("model_format", None) or _ocr_model_format()
+        super().__init__(model_name.split("__")[-1], **model_kwargs, model_format=model_format)
         self.max_resolution = 736
         self.mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         self.std_inv = np.float32(1.0) / (np.array([0.5, 0.5, 0.5], dtype=np.float32) * 255.0)
@@ -43,7 +54,7 @@ class TextDetector(InferenceModel):
     def _download(self) -> None:
         model_info = InferSession.get_model_url(
             FileInfo(
-                engine_type=EngineType.ONNXRUNTIME,
+                engine_type=_ocr_engine_type(),
                 ocr_version=OCRVersion.PPOCRV5,
                 task_type=TaskType.DET,
                 lang_type=LangDet.CH,
@@ -59,7 +70,8 @@ class TextDetector(InferenceModel):
         DownloadFile.run(download_params)
 
     def _load(self) -> ModelSession:
-        # TODO: support other runtime sessions
+        if self.model_format == ModelFormat.MNN:
+            return MnnSession(self.model_path)
         return OrtSession(self.model_path)
 
     # partly adapted from RapidOCR

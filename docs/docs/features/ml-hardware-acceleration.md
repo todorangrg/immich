@@ -86,6 +86,9 @@ You do not need to redo any machine learning jobs after enabling hardware accele
   - For RK3576 and RK3588, set `MACHINE_LEARNING_RKNN_THREADS=3` so each of the three NPU cores can service a concurrent request. Contexts share model weights, so RAM barely grows versus the single-core default while sustained throughput can approach **3×**.
   - Keep `MACHINE_LEARNING_WORKERS=1` unless you have a specific reason not to: each worker process still loads its own copy of the weights.
   - Raise Immich job concurrency (Smart Search / Face Detection, and related ML jobs) to at least `3` so those NPU cores stay busy under sustained load.
+- The `-rknn` image also includes **MNN** with OpenCL/Vulkan for OCR. OCR uses dynamic shapes that are a poor fit for the NPU; MNN runs OCR on the Mali GPU instead.
+  - Mount Mali OpenCL/Vulkan libraries via `hwaccel.ml.yml` (the `rknn` service includes these mounts). Paths may need adjusting for your vendor image.
+  - Tune OCR acceleration with `MACHINE_LEARNING_MNN_*` (default backend is `OPENCL`; `MACHINE_LEARNING_MNN_NUM_THREAD` defaults to `68` as an OpenCL kernel-tuning hint on RK3588). Kernel caches are stored next to each OCR model as `model.mnncache` in the Immich model cache. Set `MACHINE_LEARNING_MNN=false` to force OCR onto ONNX Runtime CPU.
 
 ## Setup
 
@@ -98,7 +101,7 @@ You do not need to redo any machine learning jobs after enabling hardware accele
 
 You can confirm the device is being recognized and used by checking its utilization. There are many tools to display this, such as `nvtop` for NVIDIA or Intel, `intel_gpu_top` for Intel, and `radeontop` for AMD.
 
-You can also check the logs of the `immich-machine-learning` container. When a Smart Search or Face Detection job begins, or when you search with text in Immich, you should either see a log for `Available ORT providers` containing the relevant provider (e.g. `CUDAExecutionProvider` in the case of CUDA), a `Loaded ANN model` log entry without errors in the case of ARM NN, or a `Loading RKNN model ... with N worker(s)` log entry for RKNN.
+You can also check the logs of the `immich-machine-learning` container. When a Smart Search or Face Detection job begins, or when you search with text in Immich, you should either see a log for `Available ORT providers` containing the relevant provider (e.g. `CUDAExecutionProvider` in the case of CUDA), or a `Loaded ANN model` log entry without errors in the case of ARM NN.
 
 #### Single Compose File
 
@@ -175,4 +178,4 @@ Note that you should increase job concurrencies to increase overall utilization 
     - If `MACHINE_LEARNING_RKNN_THREADS` is at the default of 1, RKNPU will have substantially lower throughput for ML jobs than ARM NN in most cases, but similar latency (such as when searching)
     - If `MACHINE_LEARNING_RKNN_THREADS` is set to 3, it will be somewhat faster than ARM NN at FP32, but somewhat slower than ARM NN if `MACHINE_LEARNING_ANN_FP16_TURBO` is enabled
     - When other tasks also use the GPU (like transcoding), RKNPU has a significant advantage over ARM NN as it uses the otherwise idle NPU instead of competing for GPU usage
-  - Lower RAM usage than earlier RKNN builds: multi-core pools share weights via context duplication, so setting `MACHINE_LEARNING_RKNN_THREADS=3` no longer multiplies model memory by the thread count. Prefer that setting on RK3576/RK3588, keep `MACHINE_LEARNING_WORKERS=1`, and raise Immich ML job concurrency to match so each NPU core can service a concurrent request (~3× sustained throughput).
+  - Lower RAM usage if `MACHINE_LEARNING_RKNN_THREADS` is at the default of 1, but significantly higher if greater than 1 (which is necessary for it to fully utilize the NPU and hence be comparable in speed to ARM NN)

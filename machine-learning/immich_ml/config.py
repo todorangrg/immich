@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     ann_tuning_level: int = 2
     rknn: bool = True
     rknn_threads: int = 1
+    mnn: bool = True
+    mnn_backend: str = "OPENCL"
+    # OpenCL: kernel-tuning hint (not CPU cores). 68 is a strong RK3588 Mali default.
+    mnn_num_thread: int = 68
+    mnn_precision: int = 2  # Low
+    mnn_memory: int = 2  # Low
+    mnn_power: int = 1  # High
     preload: PreloadModelData | None = None
     max_batch_size: MaxBatchSize | None = None
     openvino_precision: ModelPrecision = ModelPrecision.FP32

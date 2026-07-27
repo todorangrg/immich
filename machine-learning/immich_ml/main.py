@@ -21,6 +21,7 @@ from starlette.formparsers import MultiPartParser
 from immich_ml.models import get_model_deps
 from immich_ml.models.base import InferenceModel
 from immich_ml.models.transforms import decode_pil
+from immich_ml.sessions.mnn import install_mnn_defaults
 
 from .config import PreloadModelData, log, settings
 from .models.cache import ModelCache
@@ -38,6 +39,8 @@ from .schemas import (
 )
 
 MultiPartParser.spool_max_size = 2**26  # spools to disk if payload is 64 MiB or larger
+
+install_mnn_defaults()
 
 model_cache = ModelCache(revalidate=settings.model_ttl > 0)
 thread_pool: ThreadPoolExecutor | None = None

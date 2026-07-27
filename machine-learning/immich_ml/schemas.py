@@ -42,6 +42,7 @@ class ModelType(StrEnum):
 
 class ModelFormat(StrEnum):
     ARMNN = "armnn"
+    MNN = "mnn"
     ONNX = "onnx"
     RKNN = "rknn"
 
