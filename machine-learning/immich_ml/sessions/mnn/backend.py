@@ -81,6 +81,10 @@ def install_mnn_defaults() -> bool:
             return getattr(self._obj, name)
 
     MNN.Interpreter = ConfiguredInterpreter  # type: ignore[misc, assignment]
+    # TEMPORARY (testing only): delete when RapidOCR lands getNumpyData() for MNNInferSession.
+    from ._temporary_rapidocr_numpy_patch import apply_temporary_rapidocr_numpy_patch
+
+    apply_temporary_rapidocr_numpy_patch()
     _installed = True
     log.info(
         "Configured MNN session defaults: backend=%s, numThread=%s, precision=%s, memory=%s, power=%s",
