@@ -64,7 +64,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Build inference-only libMNN (CPU + OpenCL + Vulkan + FP16) for OCR on Rockchip Mali.
 # Split make from PyMNN install so a failed install keeps the expensive compile layer cached.
-RUN if [ "$DEVICE" = "rknn" ]; then \
+# Patch matmul_params_buf DEAL_BIAS macros before cmake: Mali OpenCL fails to compile the
+# stock #elif chain (implicit DEAL_BIAS, err:-11) on fused-Attention / biased-MatMul Xgemm.
+# Patch Mali CL_DEVICE_NAME lookup: Rockchip reports "Mali-G610 r0p0" but the map keys are
+# exact "Mali-G610" → GpuLevel UNDEFINED without prefix match.
+# MNN_GPU_TIME_PROFILE: per-kernel OpenCL/Vulkan timing (ENABLE_*_TIME_PROFILER). Slows
+# inference; prints "kernel time = … us" + totals. Override: --build-arg MNN_GPU_TIME_PROFILE=OFF
+# (SILENT left OFF so dumps include every kernel — needed for Vulkan vs OpenCL compares).
+ARG MNN_GPU_TIME_PROFILE=OFF
+RUN --mount=type=bind,source=scripts/patch-mnn-opencl-deal-bias.py,target=/tmp/patch-mnn-opencl-deal-bias.py \
+    --mount=type=bind,source=scripts/patch-mnn-opencl-mali-device-name.py,target=/tmp/patch-mnn-opencl-mali-device-name.py \
+    if [ "$DEVICE" = "rknn" ]; then \
+        python3 /tmp/patch-mnn-opencl-deal-bias.py /tmp/mnn-src && \
+        python3 /tmp/patch-mnn-opencl-mali-device-name.py /tmp/mnn-src && \
         mkdir -p /tmp/mnn-src/pymnn_build && \
         cd /tmp/mnn-src/pymnn_build && \
         cmake /tmp/mnn-src \
@@ -82,6 +94,7 @@ RUN if [ "$DEVICE" = "rknn" ]; then \
             -DMNN_VULKAN_IMAGE=OFF \
             -DMNN_LOW_MEMORY=OFF \
             -DMNN_SUPPORT_TRANSFORMER_FUSE=ON \
+            -DMNN_GPU_TIME_PROFILE="${MNN_GPU_TIME_PROFILE}" \
             -DMNN_BUILD_CONVERTER=OFF \
             -DMNN_BUILD_TRAIN=OFF \
             -DMNN_BUILD_TORCH=OFF \
